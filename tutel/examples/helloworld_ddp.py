@@ -3,6 +3,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+# Recommend to initialize NUMA status at the most program begining (before any other imports)
+from tutel import system_init
+system_init.init_affinity_at_program_beginning()
+
+import os
 import time
 import torch
 import torch.optim as optim
@@ -13,18 +18,23 @@ import argparse
 
 from tutel import moe as tutel_moe
 
+assert torch.__version__ >= '1.8.0', "DDP-based MoE requires Pytorch >= 1.8.0"
+
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--local_rank', type=int, default=0)
-parser.add_argument('--batch_size', type=int, default=4)
-parser.add_argument('--num_tokens', type=int, default=512)
+parser.add_argument('--local_rank', type=int, default=-1)
+parser.add_argument('--batch_size', type=int, default=8)
+parser.add_argument('--num_tokens', type=int, default=1024)
 parser.add_argument('--model_dim', type=int, default=2048)
-parser.add_argument('--hidden_size', type=int, default=1024)
+parser.add_argument('--hidden_size', type=int, default=2048)
 parser.add_argument('--num_local_experts', type=int, default=2)
 parser.add_argument('--dtype', type=str, default='float32')
 parser.add_argument('--fp32_gate', default=False, action='store_true')
 parser.add_argument('--top', type=int, default=2)
 args = parser.parse_args()
+
+if args.local_rank < 0:
+    args.local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
 torch.cuda.set_device(args.local_rank)
 
@@ -57,6 +67,8 @@ if args.dtype == 'float32':
     torch.set_default_dtype(torch.float32)
 elif args.dtype == 'float16':
     torch.set_default_dtype(torch.float16)
+elif args.dtype == 'bfloat16':
+    torch.set_default_dtype(torch.bfloat16)
 else:
     raise Exception('Unrecognized data type specified: %s' % args.dtype)
 
@@ -67,12 +79,11 @@ class ExampleModel(torch.nn.Module):
         self._ddp_params_and_buffers_to_ignore = list()
 
         self._moe_layer = tutel_moe.moe_layer(
-            gate_type = 'Top%dGate' % top_value,
-            model_dim = model_dim,
+            gate_type = {'type': 'top', 'k': top_value, 'fp32_gate': args.fp32_gate},
             experts = {'type': 'ffn', 'count_per_node': num_local_experts, 'hidden_size_per_expert': hidden_size, 'activation_fn': lambda x: F.relu(x)},
-            fp32_gate = args.fp32_gate,
+            model_dim = model_dim,
             scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
-            seeds = (1, dist_rank + 1),
+            seeds = (1, dist_rank + 1, 1),
         ).to(device)
 
         # Distinguish different parameter types: gate, local_experts
