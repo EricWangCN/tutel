@@ -22,8 +22,6 @@ from tutel import moe as tutel_moe
 
 logging.basicConfig(level=logging.INFO)
 
-assert torch.__version__ >= '1.8.0', "DDP-based MoE requires Pytorch >= 1.8.0"
-
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--local_rank', type=int, default=-1)
@@ -33,8 +31,7 @@ parser.add_argument('--model_dim', type=int, default=2048)
 parser.add_argument('--hidden_size', type=int, default=2048)
 parser.add_argument('--num_local_experts', type=int, default=2)
 parser.add_argument('--dtype', type=str, default='float32')
-parser.add_argument('--fp32_gate', default=False, action='store_true')
-parser.add_argument('--top', type=int, default=2)
+parser.add_argument('--l_aux_wt', type=float, default=0.0)
 args = parser.parse_args()
 
 if args.local_rank < 0:
@@ -61,7 +58,6 @@ num_tokens = args.num_tokens
 model_dim = args.model_dim
 hidden_size = args.hidden_size
 num_local_experts = args.num_local_experts
-top_value = args.top
 local_rank = args.local_rank
 
 
@@ -80,11 +76,10 @@ else:
 class ExampleModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self._ddp_params_and_buffers_to_ignore = list()
 
         self._moe_layer = tutel_moe.moe_layer(
-            gate_type = {'type': 'top', 'k': top_value, 'fp32_gate': args.fp32_gate},
-            experts = {'type': 'ffn', 'count_per_node': num_local_experts, 'hidden_size_per_expert': hidden_size, 'activation_fn': lambda x: F.relu(x)},
+            gate_type = {'type': 'megatron'},
+            experts = {'type': 'ffn', 'hidden_size_per_expert': hidden_size * num_local_experts, 'activation_fn': lambda x: F.relu(x)},
             model_dim = model_dim,
             scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
             seeds = (1, dist_rank + 1, 1),
@@ -100,18 +95,7 @@ class ExampleModel(torch.nn.Module):
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
-    def add_param_to_skip_allreduce(self, param_name):
-        self._ddp_params_and_buffers_to_ignore.append(param_name)
-
-
 model = ExampleModel()
-
-for name, param in model.named_parameters():
-    if hasattr(param, 'skip_allreduce'):
-        model.add_param_to_skip_allreduce(name)
-if torch.distributed.is_initialized():
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
-
 dist_print(model)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
@@ -119,10 +103,12 @@ optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 x = torch.randn([batch_size, num_tokens, model_dim], device=device, requires_grad=True)
 y = torch.LongTensor(batch_size).random_(1).to(device)
 
-tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, top_value, device)
-dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size = %s, samples = %s, num_local_experts = %s, topK = %s, device = `%s`' % tuples)
+tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, device)
+dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size = %s, samples = %s, num_local_experts = %s, gate = megatron, device = `%s`' % tuples)
 
 average_time, num_steps = 0, 100
+
+params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
 
@@ -132,7 +118,13 @@ for i in range(num_steps):
 
     output = model(x)
     loss = F.nll_loss(output, y)
+    if args.l_aux_wt:
+        loss += args.l_aux_wt * model._moe_layer.l_aux
     loss.backward()
+    if dist_world_size > 1:
+        for p in params_for_all_reduce:
+            p.grad /= dist_world_size
+            dist.all_reduce(p.grad)
     optimizer.step()
 
     torch.cuda.synchronize()

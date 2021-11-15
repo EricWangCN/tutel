@@ -3,10 +3,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# Recommend to initialize NUMA status at the most program begining (before any other imports)
-from tutel import system_init
-system_init.init_affinity_at_program_beginning()
-
 import os
 import time
 import torch
@@ -15,14 +11,10 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch import nn
 import argparse
+import deepspeed
 
 import logging
-
-from tutel import moe as tutel_moe
-
 logging.basicConfig(level=logging.INFO)
-
-assert torch.__version__ >= '1.8.0', "DDP-based MoE requires Pytorch >= 1.8.0"
 
 parser = argparse.ArgumentParser()
 
@@ -76,42 +68,47 @@ elif args.dtype == 'bfloat16':
 else:
     raise Exception('Unrecognized data type specified: %s' % args.dtype)
 
+deepspeed.init_distributed()
+deepspeed.utils.groups.initialize(ep_size=dist_world_size)
+
+class ExpertModel(torch.nn.Module):
+    def __init__(self, model_dim, hidden_size, activation_fn):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(model_dim, hidden_size, bias=True)
+        self.fc2 = torch.nn.Linear(hidden_size, model_dim, bias=True)
+        self.activation_fn = activation_fn
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.activation_fn(x)
+        x = self.fc2(x)
+        return x
 
 class ExampleModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self._ddp_params_and_buffers_to_ignore = list()
 
-        self._moe_layer = tutel_moe.moe_layer(
-            gate_type = {'type': 'top', 'k': top_value, 'fp32_gate': args.fp32_gate},
-            experts = {'type': 'ffn', 'count_per_node': num_local_experts, 'hidden_size_per_expert': hidden_size, 'activation_fn': lambda x: F.relu(x)},
-            model_dim = model_dim,
-            scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
-            seeds = (1, dist_rank + 1, 1),
+        self._moe_layer = deepspeed.moe.layer.MoE(
+                hidden_size = hidden_size,
+                expert = ExpertModel(model_dim, hidden_size, lambda x: F.relu(x)),
+                num_experts = num_local_experts * dist_world_size,
+                k = top_value
         ).to(device)
 
+        for name, param in self._moe_layer.named_parameters():
+            if '.experts.' in name:
+                setattr(param, 'skip_allreduce', True)
+
         # Distinguish different parameter types: gate, local_experts
-        local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
-        shared_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='gate')])
+        local_count = sum([torch.numel(param) for name, param in self._moe_layer.named_parameters() if '.experts.' in name])
+        shared_count = sum([torch.numel(param) for name, param in self._moe_layer.named_parameters() if '.gate.' in name])
         dist_print('[Statistics] param count for MoE local_experts = %s, param count for MoE gate = %s.\n' % (local_count, shared_count))
 
     def forward(self, input):
-        result = self._moe_layer(input)
+        result, _, _ = self._moe_layer(input)
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
-    def add_param_to_skip_allreduce(self, param_name):
-        self._ddp_params_and_buffers_to_ignore.append(param_name)
-
-
 model = ExampleModel()
-
-for name, param in model.named_parameters():
-    if hasattr(param, 'skip_allreduce'):
-        model.add_param_to_skip_allreduce(name)
-if torch.distributed.is_initialized():
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
-
 dist_print(model)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
@@ -124,6 +121,8 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 
 average_time, num_steps = 0, 100
 
+params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
+
 for i in range(num_steps):
 
     torch.cuda.synchronize()
@@ -133,6 +132,10 @@ for i in range(num_steps):
     output = model(x)
     loss = F.nll_loss(output, y)
     loss.backward()
+    if dist_world_size > 1:
+        for p in params_for_all_reduce:
+            p.grad /= dist_world_size
+            dist.all_reduce(p.grad)
     optimizer.step()
 
     torch.cuda.synchronize()
