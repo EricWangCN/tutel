@@ -9,13 +9,26 @@ How to setup Tutel MoE for Pytorch:
 ```
 * Install Online:
 
+        $ python3 -m pip uninstall tutel -y
         $ python3 -m pip install --user --upgrade git+https://github.com/microsoft/tutel@v0.1.x
 
 * Build from Source:
 
         $ git clone https://github.com/microsoft/tutel --branch v0.1.x
 
+        $ python3 -m pip uninstall tutel -y
         $ python3 ./tutel/setup.py install --user
+
+* Quick Test on Single-GPU:
+
+        $ python3 -m tutel.examples.helloworld --batch_size=16               # To Test Tutel-optimized MoE + manual distribution
+        $ python3 -m tutel.examples.helloworld_ddp --batch_size=16           # To Test Tutel-optimized MoE + Pytorch DDP distribution (requires: Pytorch >= 1.8.0)
+        $ python3 -m tutel.examples.helloworld_megatron --batch_size=16      # To Test Tutel using Megatron Gating (Tensor Parallel on Experts) + manual distribution
+        $ python3 -m tutel.examples.helloworld_deepspeed --batch_size=16     # To Test Deepspeed MoE + manual distribution
+
+        (If building from source, the following method also works:)
+        $ python3 ./tutel/examples/helloworld.py --batch_size=32
+        ..
 ```
 
 How to import Tutel-optimized MoE in Pytorch:
@@ -32,11 +45,20 @@ moe_layer = tutel_moe.moe_layer(
     experts={
         'count_per_node': 2,
         'type': 'ffn', 'hidden_size_per_expert': 2048, 'activation_fn': lambda x: torch.nn.functional.relu(x)
-    }
+    },
+    scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
 )
 
 # Cast to GPU
 moe_layer = moe_layer.to('cuda:0')
+
+# In distributed model, you need further skip doing allreduce on global parameters that has `skip_allreduce` mask, 
+# e.g.
+#    for p in moe_layer.parameters():
+#        if hasattr(p, 'skip_allreduce'):
+#            continue
+#        dist.all_reduce(p.grad)
+
 
 # Forward MoE:
 y = moe_layer(x)
@@ -44,23 +66,11 @@ y = moe_layer(x)
 print(y)
 ```
 
-Full Examples & Usage:
+Full Examples in Distributed Mode & Usage:
 ```
-* Single-GPU Test:
-
-        $ python3 -m tutel.examples.helloworld --batch_size=32               # To Test Tutel-optimized MoE + manual distribution
-        $ python3 -m tutel.examples.helloworld_ddp --batch_size=32           # To Test Tutel-optimized MoE + Pytorch DDP distribution (requires: Pytorch >= 1.8.0)
-        $ python3 -m tutel.examples.helloworld_megatron --batch_size=32      # To Test Tutel using Megatron Gating (Tensor Parallel on Experts) + manual distribution
-        $ python3 -m tutel.examples.helloworld_deepspeed --batch_size=32     # To Test Deepspeed MoE + manual distribution
-
-        (If full source code exists, the following also works:)
-        $ python3 ./tutel/examples/helloworld.py --batch_size=32
-        ..
-
 * Running MoE Hello World Model by torch.distributed.all_reduce:
 
         $ python3 -m torch.distributed.launch --nproc_per_node=2 -m tutel.examples.helloworld --batch_size=32
-        $ python3 -m torch.distributed.launch --nproc_per_node=2 -m tutel.examples.helloworld_ddp --batch_size=32
         ..
 
         (For New Pytorch:)
@@ -83,6 +93,25 @@ Full Examples & Usage:
         type             : available built-in experts implementation, e.g: ffn
         hidden_size_per_expert : the hidden size between two linear layers for each expert (used for type == 'ffn' only)
         activation_fn    : the custom-defined activation function between two linear layers (used for type == 'ffn' only)
+```
+
+### Single-GPU Throughput (batches/sec) with default settings on NVIDIA A100 (40GB):
+| batch-size | helloworld (top2) | helloworld_ddp (top2) | helloworld_megatron (fc) | helloworld_deepspeed (top2) |
+| :--------: | :--------: | :------------: | :-----------------: | :------------------: |
+| 8  | 672.75 | 672.24 | 970.446 | 188.27 |
+| 16 | 715.86 | 714.95 | 1024.15 | 115.43 |
+| 24 | 725.95 | 725.04 | 1041.89 | 81.02 |
+| 32 | 729.02 | 729.02 | 1058.11 | OOM |
+| 64 | 687.92 | 686.31 | 1056.00 | OOM |
+| 128 | 619.75 | 619.03 | 1059.59 | OOM |
+| 256 | 577.08 | 577.49 | 1053.93 | OOM |
+
+How to reproduce these results:
+```shell
+$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld --batch_size=<batch_size>
+$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_ddp --batch_size=<batch_size>
+$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_megatron --batch_size=<batch_size>
+$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_deepspeed --batch_size=<batch_size>
 ```
 
 ## Contributing
