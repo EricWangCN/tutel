@@ -2,7 +2,7 @@
 
 Tutel MoE: An Optimized Mixture-of-Experts Implementation.
 
-- Supported Framework: Pytorch
+- Supported Framework: Pytorch (recommend: >= 1.10)
 - Supported GPUs: CUDA(fp32 + fp16), ROCm(fp32 + fp16)
 
 How to setup Tutel MoE for Pytorch:
@@ -27,8 +27,20 @@ How to setup Tutel MoE for Pytorch:
         $ python3 -m tutel.examples.helloworld_deepspeed --batch_size=16     # To Test Deepspeed MoE + manual distribution
 
         (If building from source, the following method also works:)
-        $ python3 ./tutel/examples/helloworld.py --batch_size=32
+        $ python3 ./tutel/examples/helloworld.py --batch_size=16
         ..
+
+* Run Tutel MoE in Distributed Mode:
+
+        (Method A - Torch launcher for `Multi-Node x Multi-GPU`:)
+        $ ssh <node-ip-0> python3 -m torch.distributed.launch --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=<node-ip-0> -m tutel.examples.helloworld --batch_size=16
+        $ ssh <node-ip-1> python3 -m torch.distributed.launch --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=<node-ip-0> -m tutel.examples.helloworld --batch_size=16
+
+        (Method B - Tutel launcher for `Multi-Node x Multi-GPU`, requiring package `openmpi-bin`:)
+        $ mpiexec -host <node-ip-0>,<node-ip-1>,.. \
+            -x LOCAL_SIZE=8 -x MASTER_ADDR=<node-ip-0> \
+            python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+
 ```
 
 How to import Tutel-optimized MoE in Pytorch:
@@ -66,17 +78,8 @@ y = moe_layer(x)
 print(y)
 ```
 
-Full Examples in Distributed Mode & Usage:
+Usage of MOELayer:
 ```
-* Running MoE Hello World Model by torch.distributed.all_reduce:
-
-        $ python3 -m torch.distributed.launch --nproc_per_node=2 -m tutel.examples.helloworld --batch_size=32
-        ..
-
-        (For New Pytorch:)
-        $ python3 -m torch.distributed.run --nproc_per_node=2 -m tutel.examples.helloworld
-        ..
-
 * Usage of MOELayer Args:
 
         gate_type        : dict-type gate description, e.g. {'type': 'top', 'k': 2, ..}, or {'type': 'megatron'}
@@ -118,10 +121,9 @@ python3 -m tutel.examples.helloworld_deepspeed --top=1 --use_tutel
 
 How to reproduce these results:
 ```shell
-$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld --batch_size=<batch_size>
-$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_ddp --batch_size=<batch_size>
-$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_megatron --batch_size=<batch_size>
-$ python3 -m torch.distributed.launch --nproc_per_node=1 -m tutel.examples.helloworld_deepspeed --batch_size=<batch_size>
+$ python3 -m tutel.examples.helloworld --batch_size=<batch_size>
+$ python3 -m tutel.examples.helloworld_ddp --batch_size=<batch_size>
+...
 ```
 
 ## Contributing

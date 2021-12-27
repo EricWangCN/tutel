@@ -16,11 +16,7 @@ import torch.distributed as dist
 from torch import nn
 import argparse
 
-import logging
-
 from tutel import moe as tutel_moe
-
-logging.basicConfig(level=logging.INFO)
 
 assert torch.__version__ >= '1.8.0', "DDP-based MoE requires Pytorch >= 1.8.0"
 
@@ -37,24 +33,9 @@ parser.add_argument('--fp32_gate', default=False, action='store_true')
 parser.add_argument('--top', type=int, default=2)
 args = parser.parse_args()
 
-if args.local_rank < 0:
-    args.local_rank = int(os.environ.get('LOCAL_RANK', 0))
-
-torch.cuda.set_device(args.local_rank)
-
-try:
-    if dist.is_available():
-        dist.init_process_group('nccl')
-    dist_rank = dist.get_rank()
-    dist_world_size = dist.get_world_size()
-
-    def dist_print(*args):
-        if dist_rank == 0:
-            print(*args)
-except:
-    dist_rank = 0
-    dist_world_size = 1
-    dist_print = print
+parallel_env = system_init.init_data_model_parallel()
+dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
+args.local_rank = parallel_env.local_device.index
 
 batch_size = args.batch_size
 num_tokens = args.num_tokens
@@ -62,10 +43,7 @@ model_dim = args.model_dim
 hidden_size = args.hidden_size
 num_local_experts = args.num_local_experts
 top_value = args.top
-local_rank = args.local_rank
-
-
-device = torch.device('cuda', args.local_rank)
+device = parallel_env.local_device
 
 if args.dtype == 'float32':
     torch.set_default_dtype(torch.float32)
@@ -90,7 +68,7 @@ class ExampleModel(torch.nn.Module):
             seeds = (1, dist_rank + 1, 1),
         ).to(device)
 
-        # Distinguish different parameter types: gate, local_experts
+        # Summary of different parameter types: gate, local_experts
         local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
         shared_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='gate')])
         dist_print('[Statistics] param count for MoE local_experts = %s, param count for MoE gate = %s.\n' % (local_count, shared_count))
@@ -117,7 +95,7 @@ dist_print(model)
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 
 torch.manual_seed(dist_rank)
-x = torch.randn([batch_size, num_tokens, model_dim], device=device, requires_grad=True)
+x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=True, device=device)
 y = torch.LongTensor(batch_size).random_(1).to(device)
 
 tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, top_value, device)
