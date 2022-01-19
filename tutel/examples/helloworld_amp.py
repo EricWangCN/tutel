@@ -3,6 +3,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+# Recommend to initialize NUMA status at the most program begining (before any other imports)
+from tutel import system_init
+system_init.init_affinity_at_program_beginning()
+
 import os
 import time
 import torch
@@ -10,11 +14,10 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch import nn
+from torch.cuda.amp import autocast
 import argparse
-import deepspeed
 
-import logging
-logging.basicConfig(level=logging.INFO)
+from tutel import moe as tutel_moe
 
 parser = argparse.ArgumentParser()
 
@@ -27,26 +30,12 @@ parser.add_argument('--num_local_experts', type=int, default=2)
 parser.add_argument('--dtype', type=str, default='float32')
 parser.add_argument('--fp32_gate', default=False, action='store_true')
 parser.add_argument('--top', type=int, default=2)
-parser.add_argument('--use_tutel', default=False, action='store_true')
+parser.add_argument('--l_aux_wt', type=float, default=0.0)
 args = parser.parse_args()
 
-try:
-    if dist.is_available():
-        dist.init_process_group('nccl')
-    dist_rank = dist.get_rank()
-    dist_world_size = dist.get_world_size()
-
-    def dist_print(*args):
-        if dist_rank == 0:
-            print(*args)
-except:
-    dist_rank = 0
-    dist_world_size = 1
-    dist_print = print
-
-args.local_rank = args.local_rank if args.local_rank >= 0 else int(os.environ.get('LOCAL_RANK', 0))
-
-torch.cuda.set_device(args.local_rank)
+parallel_env = system_init.init_data_model_parallel()
+dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
+args.local_rank = parallel_env.local_device.index
 
 batch_size = args.batch_size
 num_tokens = args.num_tokens
@@ -54,10 +43,7 @@ model_dim = args.model_dim
 hidden_size = args.hidden_size
 num_local_experts = args.num_local_experts
 top_value = args.top
-local_rank = args.local_rank
-
-
-device = torch.device('cuda', args.local_rank)
+device = parallel_env.local_device
 
 if args.dtype == 'float32':
     torch.set_default_dtype(torch.float32)
@@ -70,45 +56,26 @@ elif args.dtype == 'bfloat16':
 else:
     raise Exception('Unrecognized data type specified: %s' % args.dtype)
 
-torch.manual_seed(0)
-deepspeed.init_distributed()
-deepspeed.utils.groups.initialize(ep_size=dist_world_size)
-
-class ExpertModel(torch.nn.Module):
-    def __init__(self, model_dim, hidden_size, activation_fn):
-        super().__init__()
-        self.fc1 = torch.nn.Linear(model_dim, hidden_size, bias=True)
-        self.fc2 = torch.nn.Linear(hidden_size, model_dim, bias=True)
-        self.activation_fn = activation_fn
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.activation_fn(x)
-        x = self.fc2(x)
-        return x
 
 class ExampleModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-        self._moe_layer = deepspeed.moe.layer.MoE(
-                hidden_size = hidden_size,
-                expert = ExpertModel(model_dim, hidden_size, lambda x: F.relu(x)),
-                num_experts = num_local_experts * dist_world_size,
-                k = top_value,
-                use_tutel = args.use_tutel
+        self._moe_layer = tutel_moe.moe_layer(
+            gate_type = {'type': 'top', 'k': top_value, 'fp32_gate': args.fp32_gate},
+            experts = {'type': 'ffn', 'count_per_node': num_local_experts, 'hidden_size_per_expert': hidden_size, 'activation_fn': lambda x: F.relu(x)},
+            model_dim = model_dim,
+            scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
+            seeds = (1, dist_rank + 1, 1),
         ).to(device)
 
-        for name, param in self._moe_layer.named_parameters():
-            if '.experts.' in name:
-                setattr(param, 'skip_allreduce', True)
-
         # Summary of different parameter types: gate, local_experts
-        local_count = sum([torch.numel(param) for name, param in self._moe_layer.named_parameters() if '.experts.' in name])
-        shared_count = sum([torch.numel(param) for name, param in self._moe_layer.named_parameters() if '.gate.' in name])
+        local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
+        shared_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='gate')])
         dist_print('[Statistics] param count for MoE local_experts = %s, param count for MoE gate = %s.\n' % (local_count, shared_count))
-
+    @autocast()
     def forward(self, input):
-        result, _, _ = self._moe_layer(input)
+        result = self._moe_layer(input)
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
@@ -133,9 +100,11 @@ for i in range(num_steps):
     torch.cuda.synchronize()
     t_start = time.time()
     optimizer.zero_grad()
-
-    output = model(x)
-    loss = F.nll_loss(output, y)
+    with autocast():
+        output = model(x)
+        loss = F.nll_loss(output, y)
+    if args.l_aux_wt:
+        loss += args.l_aux_wt * model._moe_layer.l_aux
     loss.backward()
     if dist_world_size > 1:
         for p in params_for_all_reduce:
