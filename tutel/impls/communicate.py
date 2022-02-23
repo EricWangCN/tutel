@@ -115,7 +115,12 @@ def create_groups_from_world(group_count, include_init=None):
     result.dist_print = dist_print
 
     TUTEL_GROUPING_CACHE[group_count] = result
+    dist_print(result)
     return result
+
+def destory_groups_at_end():
+    print('end')
+    return
 
 
 class AllToAllStatus:
