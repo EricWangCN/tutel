@@ -27,6 +27,7 @@ def get_world_rank(group=None):
 
 
 TUTEL_GROUPING_CACHE = {}
+TUTEL_GROUPS_CREATED = []
 
 def create_groups_from_world(group_count, include_init=None):
     backend = TUTEL_GROUPING_CACHE.get('', include_init)
@@ -68,13 +69,14 @@ def create_groups_from_world(group_count, include_init=None):
 
     if is_distributed:
         global_group = model_group = data_group = dist.group.WORLD
-
+        groups_tmp = set()
         if dist_group_size != glob_world_size:
             groups, inner_ranks = [], []
             for gr in range(dist_group_size):
                 group_ranks = [x for x in range(gr * dist_world_size, (gr + 1) * dist_world_size)]
                 groups += [dist.new_group(ranks=group_ranks)]
                 inner_ranks += [group_ranks]
+            groups_tmp.update(set(groups))
             model_group = groups[dist_group_rank]
 
         if dist_world_size != glob_world_size:
@@ -83,7 +85,9 @@ def create_groups_from_world(group_count, include_init=None):
                 group_ranks = [x for x in range(gr, dist_world_size * dist_group_size, dist_world_size)]
                 groups += [dist.new_group(ranks=group_ranks)]
                 outer_ranks += [group_ranks]
+            groups_tmp.update(set(groups))
             data_group = groups[dist_world_rank]
+        TUTEL_GROUPS_CREATED.append(groups_tmp)
     else:
         model_group, data_group, global_group = None, None, None
 
@@ -116,6 +120,12 @@ def create_groups_from_world(group_count, include_init=None):
 
     TUTEL_GROUPING_CACHE[group_count] = result
     return result
+
+def clean_up():
+    dist.barrier()
+    for groups in reversed(TUTEL_GROUPS_CREATED):
+        for group in reversed(list(groups)):
+            dist.destroy_process_group(group)
 
 
 class AllToAllStatus:

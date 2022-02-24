@@ -25,12 +25,11 @@ def init_affinity_at_program_beginning():
             logging.warning('Failed to set NUMA status: %s' % ex)
 
 def init_data_model_parallel(group_count=1, backend='nccl'):
-    from tutel.impls.communicate import create_groups_from_world
+    from tutel.impls.communicate import create_groups_from_world, clean_up
     result = create_groups_from_world(group_count=group_count, include_init=backend)
 
-    # Temp work around for: https://github.com/pytorch/pytorch/issues/56390
     import atexit
-    atexit.register(lambda *args: os._exit(0))
+    atexit.register(lambda *args: clean_up())
 
     logging.critical(f'Registering device global rank {result.global_rank}: data_rank = {result.data_rank}, model_rank = {result.model_rank}')
     return result
