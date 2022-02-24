@@ -125,6 +125,7 @@ def clean_up():
     dist.barrier()
     for groups in reversed(TUTEL_GROUPS_CREATED):
         for group in reversed(list(groups)):
+            dist.barrier(group)
             dist.destroy_process_group(group)
     dist.destroy_process_group()
 
