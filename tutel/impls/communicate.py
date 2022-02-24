@@ -126,7 +126,7 @@ def clean_up():
     for groups in reversed(TUTEL_GROUPS_CREATED):
         for group in reversed(list(groups)):
             dist.destroy_process_group(group)
-
+    dist.destroy_process_group()
 
 class AllToAllStatus:
     initialized = False
