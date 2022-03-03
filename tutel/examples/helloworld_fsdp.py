@@ -17,7 +17,6 @@ from torch import nn
 import argparse
 
 from fairscale.nn import wrap
-import functools
 
 from tutel import moe as tutel_moe
 
