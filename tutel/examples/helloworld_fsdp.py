@@ -91,8 +91,6 @@ def fsdp_wrap_expert(layer):
     for i, expert in enumerate(layer._moe_layer.experts):
         layer._moe_layer.experts[i] = wrap(expert)
 
-    expert_normalization_term = num_local_experts * dist_world_size
-
     layer = wrap(layer)
     return layer
 
