@@ -5,6 +5,10 @@ Tutel MoE: An Optimized Mixture-of-Experts Implementation.
 - Supported Framework: Pytorch (recommend: >= 1.10)
 - Supported GPUs: CUDA(fp64/fp32/fp16/bfp16), ROCm(fp64/fp32/fp16)
 
+<p align="center">
+  <img src="figure.svg" /></a>
+</p>
+
 How to setup Tutel MoE for Pytorch:
 ```
 * Recommended Pytorch:
@@ -14,6 +18,8 @@ How to setup Tutel MoE for Pytorch:
         python3 -m pip install --user torch==1.10.0+cu113 torchvision==0.11.1+cu113 -f https://download.pytorch.org/whl/torch_stable.html
         #   Pytorch for AMD ROCm == 4.2:
         python3 -m pip install --user torch==1.10.0+rocm4.2 torchvision==0.11.1+rocm4.2 -f https://download.pytorch.org/whl/torch_stable.html
+        #   Pytorch for CPU:
+        python3 -m pip install --user torch==1.10.0+cpu torchvision==0.11.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
 
 * Install Tutel Online:
 
@@ -45,9 +51,12 @@ How to setup Tutel MoE for Pytorch:
         $ ssh <node-ip-1> python3 -m torch.distributed.launch --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=<node-ip-0> -m tutel.examples.helloworld --batch_size=16
 
         (Method B - Tutel launcher for `Multi-Node x Multi-GPU`, requiring package `openmpi-bin`:)
-        $ mpiexec -host <node-ip-0>,<node-ip-1>,.. \
-            -x LOCAL_SIZE=8 -x MASTER_ADDR=<node-ip-0> \
-            python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+        # << Single Node >>
+        $ mpiexec -host localhost -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+        # << Cross Nodes >>
+        $ mpiexec -host <node-ip-0>,<node-ip-1>,.. -x MASTER_ADDR=<node-ip-0> -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+        # << For CPU-based Launch>>
+        $ mpiexec -host localhost -x LOCAL_SIZE=1 -bind-to none -x OMP_NUM_THREADS=1024 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16 --device cpu
 
 ```
 
@@ -94,11 +103,14 @@ Usage of MOELayer:
                               or a list of dict-type gate descriptions, e.g. [{'type': 'top', 'k', 2}, {'type': 'top', 'k', 2}],
                               the value of k in top-gating can be also negative, like -2, which indicates one GPU will hold 1/(-k) parameters of an expert
         model_dim        : the number of channels for MOE's input tensor
-        experts          : a dict-type config for builtin expert network, or a torch.nn.Module-type custom expert network
+        experts          : a dict-type config for builtin expert network
         scan_expert_func : allow users to specify a lambda function to iterate each experts param, e.g. `scan_expert_func = lambda name, param: setattr(param, 'expert', True)`
         result_func      : allow users to specify a lambda function to format the MoE output and aux_loss, e.g. `result_func = lambda output: (output, output.l_aux)`
         group            : specify the explicit communication group of all_to_all
         seeds            : a tuple containing a tripple of int to specify manual seed of (shared params, local params, others params after MoE's)
+        a2a_ffn_overlap_degree : the value to control a2a overlap depth, 1 by default for no overlap, 2 for overlap a2a with half gemm, ..
+        parallel_type    : the parallel method to compute MoE, valid types: 'auto', 'data', 'model'
+        pad_samples      : whether do auto padding on newly-coming input data to maximum data size in history
 
 * Usage of dict-type Experts Config:
 
@@ -119,15 +131,15 @@ python3 -m tutel.examples.helloworld_deepspeed --top=1 --use_tutel
 
 
 ### Single-GPU Throughput (batches/sec) with default settings on NVIDIA A100 (40GB):
-| batch-size | helloworld (top2) | helloworld_ddp (top2) | helloworld_megatron (fc) | helloworld_deepspeed (top2) |
-| :--------: | :--------: | :------------: | :-----------------: | :------------------: |
-| 8  | 672.75 | 672.24 | 970.446 | 188.27 |
-| 16 | 715.86 | 714.95 | 1024.15 | 115.43 |
-| 24 | 725.95 | 725.04 | 1041.89 | 81.02 |
-| 32 | 729.02 | 729.02 | 1058.11 | OOM |
-| 64 | 687.92 | 686.31 | 1056.00 | OOM |
-| 128 | 619.75 | 619.03 | 1059.59 | OOM |
-| 256 | 577.08 | 577.49 | 1053.93 | OOM |
+| batch-size | helloworld (top2) | helloworld_ddp (top2) | helloworld_deepspeed (top2) |
+| :--------: | :--------: | :------------: | :------------------: |
+| 8  | 672.75 | 672.24 | 188.27 |
+| 16 | 715.86 | 714.95 | 115.43 |
+| 24 | 725.95 | 725.04 | 81.02 |
+| 32 | 729.02 | 729.02 | OOM |
+| 64 | 687.92 | 686.31 | OOM |
+| 128 | 619.75 | 619.03 | OOM |
+| 256 | 577.08 | 577.49 | OOM |
 
 How to reproduce these results:
 ```shell

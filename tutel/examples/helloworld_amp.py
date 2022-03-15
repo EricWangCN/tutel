@@ -3,9 +3,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# Recommend to initialize NUMA status at the most program begining (before any other imports)
+
 from tutel import system_init
-system_init.init_affinity_at_program_beginning()
+
 
 import os
 import time
@@ -71,7 +71,7 @@ class ExampleModel(torch.nn.Module):
             scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
             seeds = (1, dist_rank + 1, 1),
             a2a_ffn_overlap_degree = a2a_ffn_overlap_degree,
-        ).to(device)
+        )
 
         # Summary of different parameter types: gate, local_experts
         local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
@@ -83,7 +83,7 @@ class ExampleModel(torch.nn.Module):
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
-model = ExampleModel()
+model = ExampleModel().to(device)
 dist_print(model)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
@@ -97,7 +97,7 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 
 average_time, num_steps = 0, args.num_steps
 
-params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False) and p.grad is not None]
+params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
 

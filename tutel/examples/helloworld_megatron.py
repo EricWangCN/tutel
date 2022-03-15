@@ -3,9 +3,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# Recommend to initialize NUMA status at the most program begining (before any other imports)
+
 from tutel import system_init
-system_init.init_affinity_at_program_beginning()
+
 
 import os
 import time
@@ -29,9 +29,10 @@ parser.add_argument('--num_local_experts', type=int, default=2)
 parser.add_argument('--dtype', type=str, default='float32')
 parser.add_argument('--l_aux_wt', type=float, default=0.0)
 parser.add_argument('--num_steps', type=int, default=100)
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 args = parser.parse_args()
 
-parallel_env = system_init.init_data_model_parallel()
+parallel_env = system_init.init_data_model_parallel(backend='nccl' if args.device == 'cuda' else 'gloo')
 dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
 args.local_rank = parallel_env.local_device.index
 
@@ -64,7 +65,7 @@ class ExampleModel(torch.nn.Module):
             model_dim = model_dim,
             scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
             seeds = (1, dist_rank + 1, 1),
-        ).to(device)
+        )
 
         # Summary of different parameter types: gate, local_experts
         local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
@@ -76,7 +77,7 @@ class ExampleModel(torch.nn.Module):
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
-model = ExampleModel()
+model = ExampleModel().to(device)
 dist_print(model)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
@@ -90,11 +91,11 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 
 average_time, num_steps = 0, args.num_steps
 
-params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False) and p.grad is not None]
+params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
-
-    torch.cuda.synchronize()
+    if x.is_cuda:
+        torch.cuda.synchronize()
     t_start = time.time()
     optimizer.zero_grad()
 
@@ -109,7 +110,8 @@ for i in range(num_steps):
             dist.all_reduce(p.grad)
     optimizer.step()
 
-    torch.cuda.synchronize()
+    if x.is_cuda:
+        torch.cuda.synchronize()
     t_stop = time.time()
     dist_print('STEP-%s: DONE, loss = %s, step_time = %s sec.' % (i, float(loss.data), t_stop - t_start))
 

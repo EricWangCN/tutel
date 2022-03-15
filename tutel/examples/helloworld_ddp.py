@@ -3,9 +3,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# Recommend to initialize NUMA status at the most program begining (before any other imports)
+
 from tutel import system_init
-system_init.init_affinity_at_program_beginning()
+
 
 import os
 import time
@@ -33,9 +33,10 @@ parser.add_argument('--fp32_gate', default=False, action='store_true')
 parser.add_argument('--top', type=int, default=2)
 parser.add_argument('--a2a_ffn_overlap_degree', type=int, default=1)
 parser.add_argument('--num_steps', type=int, default=100)
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 args = parser.parse_args()
 
-parallel_env = system_init.init_data_model_parallel()
+parallel_env = system_init.init_data_model_parallel(backend='nccl' if args.device == 'cuda' else 'gloo')
 dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
 args.local_rank = parallel_env.local_device.index
 
@@ -72,7 +73,7 @@ class ExampleModel(torch.nn.Module):
             scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True),
             seeds = (1, dist_rank + 1, 1),
             a2a_ffn_overlap_degree = a2a_ffn_overlap_degree,
-        ).to(device)
+        )
 
         # Summary of different parameter types: gate, local_experts
         local_count = sum([torch.numel(param) for name, param in self._moe_layer.get_parameter_iterator(param_type='local_experts')])
@@ -88,7 +89,7 @@ class ExampleModel(torch.nn.Module):
         self._ddp_params_and_buffers_to_ignore.append(param_name)
 
 
-model = ExampleModel()
+model = ExampleModel().to(device)
 
 for name, param in model.named_parameters():
     if hasattr(param, 'skip_allreduce'):
@@ -110,8 +111,8 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 average_time, num_steps = 0, args.num_steps
 
 for i in range(num_steps):
-
-    torch.cuda.synchronize()
+    if x.is_cuda:
+        torch.cuda.synchronize()
     t_start = time.time()
     optimizer.zero_grad()
 
@@ -120,7 +121,8 @@ for i in range(num_steps):
     loss.backward()
     optimizer.step()
 
-    torch.cuda.synchronize()
+    if x.is_cuda:
+        torch.cuda.synchronize()
     t_stop = time.time()
     dist_print('STEP-%s: DONE, loss = %s, step_time = %s sec.' % (i, float(loss.data), t_stop - t_start))
 

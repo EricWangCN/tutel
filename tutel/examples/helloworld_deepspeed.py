@@ -97,7 +97,7 @@ class ExampleModel(torch.nn.Module):
                 num_experts = num_local_experts * dist_world_size,
                 k = top_value,
                 use_tutel = args.use_tutel
-        ).to(device)
+        )
 
         for name, param in self._moe_layer.named_parameters():
             if '.experts.' in name:
@@ -113,7 +113,7 @@ class ExampleModel(torch.nn.Module):
         result = F.log_softmax(torch.sum(result, dim=2), dim=1)
         return result
 
-model = ExampleModel()
+model = ExampleModel().to(device)
 dist_print(model)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
@@ -127,7 +127,7 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 
 average_time, num_steps = 0, args.num_steps
 
-params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False) and p.grad is not None]
+params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
 
