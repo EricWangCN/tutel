@@ -1,4 +1,4 @@
-# Training Bert on Megatron_LM with Tutel:
+# Training a GPT model on Megatron_LM with Tutel:
 ## Install Tutel
 ```shell
 git clone https://github.com/microsoft/tutel --branch main
@@ -30,7 +30,7 @@ curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/WikipediaDataset_tex
 cd ..
 ```
 
-## Train a Bert model with Tutel MoE (MOE is moe-freq)
+## Train a GPT model with Tutel MoE (MOE is moe-freq)
 ```shell
 ../run_megatron.sh
 ```
