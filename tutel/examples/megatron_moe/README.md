@@ -32,5 +32,5 @@ cd ..
 
 ## Train a GPT model with Tutel MoE (MOE is moe-freq)
 ```shell
-../run_megatron.sh
+../run_megatron_gpt.sh
 ```
