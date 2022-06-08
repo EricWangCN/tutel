@@ -22,15 +22,15 @@ For preprocessing own dataset, please refer [Megatron_LM](https://github.com/NVI
 ```shell
 mkdir data && cd data
 ```
-Use public HackerNewsDataset:
+
+Use public Wikipedia Processed Dataset:
 ```shell
-curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/HackerNewsDataset_text_document.bin
-curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/HackerNewsDataset_text_document.idx
+curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/WikipediaDataset_text_document.bin
+curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/WikipediaDataset_text_document.idx
 cd ..
 ```
 
 ## Train a Bert model with Tutel MoE (MOE is moe-freq)
 ```shell
-
-
+../run_megatron.sh
 ```
