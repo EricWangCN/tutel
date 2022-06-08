@@ -90,13 +90,20 @@ static std::string nvcc_compile(const char* code, const std::string &arch) {
 
   file_write(code_path, code);
   std::string fatbin_path = code_path + std::string(".fatbin");
+#if !defined(__HIP_PLATFORM_HCC__)
+  const char *entry = "/usr/local/cuda/bin/nvcc";
+#else
+  const char *entry = "/opt/rocm/bin/hipcc";
+#endif
 
+  if (access(entry, F_OK) != 0)
+    return "";
   pid_t  pid = fork();
   if (pid == 0) {
 #if !defined(__HIP_PLATFORM_HCC__)
-    CHECK_EQ(-1, execl("/usr/local/cuda/bin/nvcc", "/usr/local/cuda/bin/nvcc", code_path, "-o", fatbin_path.c_str(), "--fatbin", "-O4", "-gencode", ("arch=compute_" + arch + ",code=sm_" + arch).c_str(), (char *)NULL));
+    CHECK_EQ(-1, execl(entry, entry, code_path, "-o", fatbin_path.c_str(), "--fatbin", "-O4", "-gencode", ("arch=compute_" + arch + ",code=sm_" + arch).c_str(), (char *)NULL));
 #else
-    CHECK_EQ(-1, execl("/opt/rocm/bin/hipcc", "/opt/rocm/bin/hipcc", code_path, "-o", fatbin_path.c_str(), "--genco", "-O4", "-w" , ("--amdgpu-target=" + arch).c_str(), (char *)NULL));
+    CHECK_EQ(-1, execl(entry, entry, code_path, "-o", fatbin_path.c_str(), "--genco", "-O4", "-w" , ("--amdgpu-target=" + arch).c_str(), (char *)NULL));
 #endif
     exit(1);
   } else {
@@ -127,7 +134,12 @@ static std::string nvrtc_compile(const char* code, const std::string &arch) {
   log.resize(log_size);
   CHECK_EQ(0, nvrtcGetProgramLog(prog, &log[0]));
   if (0 != res) {
-    LOG(ERROR) << log << " Failed to use NVRTC for JIT compilation in this Pytorch version, try another approach using CUDA compiler.. (To always disable NVRTC, please: export USE_NVRTC=0)";
+    static bool once_flag = false;
+    if (!once_flag) {
+      once_flag = true;
+      LOG(WARNING) << log << " Failed to use NVRTC for JIT compilation in this Pytorch version, try another approach using CUDA compiler.. (To always disable NVRTC, please: export USE_NVRTC=0)";
+    }
+    CHECK_EQ(0, nvrtcDestroyProgram(&prog));
     return "";
   }
 
@@ -168,10 +180,10 @@ inline static CUfunction jit_activate(int fd, int dev) {
 #endif
     const char *source = gm.code.data(), *pos, *tail;
 
-    int use_nvrtc = getenv("USE_NVRTC") ? std::atoi(getenv("USE_NVRTC")) : 1;
+    int use_nvrtc = getenv("USE_NVRTC") ? std::atoi(getenv("USE_NVRTC")) : 0;
     std::string image;
-    if (!use_nvrtc || (image = nvrtc_compile(source, arch)) == "") {
-        image = nvcc_compile(source, arch);
+    if (use_nvrtc || (image = nvcc_compile(source, arch)) == "") {
+        image = nvrtc_compile(source, arch);
     }
 
     long launch_bound;
@@ -360,20 +372,20 @@ extern "C" __global__ void memStrideCopyKernel(
     CHECK_NE(-1, mem_stride_copy_char_fd);
     CHECK_NE(-1, mem_stride_copy_uint4_fd);
     CUfunction hfunc = jit::jit_activate(mem_stride_copy_uint4_fd, g_local_rank);
-#if !defined(HIP_VERSION) || HIP_VERSION > 402
+#if !defined(__HIP_PLATFORM_HCC__)
     CHECK_EQ(0, cuOccupancyMaxPotentialBlockSize(&mem_stride_copy_gridsize, &mem_stride_copy_blocksize, hfunc, 0, 0, 0));
 #else
-    CHECK_EQ(0, hipOccupancyMaxPotentialBlockSize(&mem_stride_copy_gridsize, &mem_stride_copy_blocksize, hfunc, 0, 0U));
+    CHECK_EQ(0, hipModuleOccupancyMaxPotentialBlockSize(&mem_stride_copy_gridsize, &mem_stride_copy_blocksize, hfunc, 0, 0));
 #endif
   }
 }
 
-static at::cuda::CUDAStream& get_default_stream() {
+inline at::cuda::CUDAStream& get_default_stream() {
   static at::cuda::CUDAStream default_stream = at::cuda::getDefaultCUDAStream();
   return default_stream;
 }
 
-static at::cuda::CUDAStream& get_nccl_stream() {
+inline at::cuda::CUDAStream& get_nccl_stream() {
   static at::cuda::CUDAStream nccl_stream = at::cuda::getStreamFromPool();
   return nccl_stream;
 }

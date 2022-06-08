@@ -4,14 +4,15 @@ Tutel MoE: An Optimized Mixture-of-Experts Implementation.
 
 - Supported Framework: Pytorch (recommend: >= 1.10)
 - Supported GPUs: CUDA(fp64/fp32/fp16/bfp16), ROCm(fp64/fp32/fp16)
+- Supported CPU: fp64/fp32
 
 <p align="center">
   <img src="figure.svg" /></a>
 </p>
 
-How to setup Tutel MoE for Pytorch:
+How to setup Tutel MoE for Pytorch and [run examples](tutel/examples):
 ```
-* Recommended Pytorch:
+* Recommended Pytorch (minimize version == 1.8.0):
         #   Pytorch for NVIDIA CUDA >= 10.2:
         python3 -m pip install --user torch==1.10.0+cu102 torchvision==0.11.1+cu102 -f https://download.pytorch.org/whl/torch_stable.html
         #   Pytorch for NVIDIA CUDA >= 11.3:
@@ -35,10 +36,11 @@ How to setup Tutel MoE for Pytorch:
 
 * Quick Test on Single-GPU:
 
-        $ python3 -m tutel.examples.helloworld --batch_size=16               # To Test Tutel-optimized MoE + manual distribution
-        $ python3 -m tutel.examples.helloworld_ddp --batch_size=16           # To Test Tutel-optimized MoE + Pytorch DDP distribution (requires: Pytorch >= 1.8.0)
-        $ python3 -m tutel.examples.helloworld_megatron --batch_size=16      # To Test Tutel using Megatron Gating (Tensor Parallel on Experts) + manual distribution
-        $ python3 -m tutel.examples.helloworld_deepspeed --batch_size=16     # To Test Deepspeed MoE + manual distribution
+        $ python3 -m tutel.examples.helloworld --batch_size=16               # Test Tutel-optimized MoE + manual distribution
+        $ python3 -m tutel.examples.helloworld_ddp --batch_size=16           # Test Tutel-optimized MoE + Pytorch DDP distribution (requires: Pytorch >= 1.8.0)
+        $ python3 -m tutel.examples.helloworld_amp --batch_size=16           # Test Tutel-optimized MoE with AMP data type + manual distribution
+        $ python3 -m tutel.examples.helloworld_deepspeed --batch_size=16     # Test Deepspeed (0.5.6) MoE + manual distribution
+        $ python3 -m tutel.examples.helloworld_from_scratch                  # Test Custom MoE implementation from scratch
 
         (If building from source, the following method also works:)
         $ python3 ./tutel/examples/helloworld.py --batch_size=16
@@ -52,11 +54,11 @@ How to setup Tutel MoE for Pytorch:
 
         (Method B - Tutel launcher for `Multi-Node x Multi-GPU`, requiring package `openmpi-bin`:)
         # << Single Node >>
-        $ mpiexec -host localhost -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+        $ mpiexec -bind-to none -host localhost -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
         # << Cross Nodes >>
-        $ mpiexec -host <node-ip-0>,<node-ip-1>,.. -x MASTER_ADDR=<node-ip-0> -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
+        $ mpiexec -bind-to none -host <node-ip-0>,<node-ip-1>,.. -x MASTER_ADDR=<node-ip-0> -x LOCAL_SIZE=8 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16
         # << For CPU-based Launch>>
-        $ mpiexec -host localhost -x LOCAL_SIZE=1 -bind-to none -x OMP_NUM_THREADS=1024 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16 --device cpu
+        $ mpiexec -bind-to none -host localhost -x LOCAL_SIZE=1 -x OMP_NUM_THREADS=1024 python3 -m tutel.launcher.run -m tutel.examples.helloworld --batch_size=16 --device cpu
 
 ```
 
@@ -99,7 +101,7 @@ Usage of MOELayer:
 ```
 * Usage of MOELayer Args:
 
-        gate_type        : dict-type gate description, e.g. {'type': 'top', 'k': 2, ..}, or {'type': 'megatron'},
+        gate_type        : dict-type gate description, e.g. {'type': 'top', 'k': 2, ..},
                               or a list of dict-type gate descriptions, e.g. [{'type': 'top', 'k', 2}, {'type': 'top', 'k', 2}],
                               the value of k in top-gating can be also negative, like -2, which indicates one GPU will hold 1/(-k) parameters of an expert
         model_dim        : the number of channels for MOE's input tensor
@@ -145,7 +147,7 @@ How to reproduce these results:
 ```shell
 $ python3 -m tutel.examples.helloworld --batch_size=<batch_size>
 $ python3 -m tutel.examples.helloworld_ddp --batch_size=<batch_size>
-...
+$ python3 -m tutel.examples.helloworld_deepspeed --batch_size=<batch_size>
 ```
 
 ## Contributing

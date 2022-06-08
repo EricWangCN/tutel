@@ -71,6 +71,8 @@ elif args.dtype == 'bfloat16':
 else:
     raise Exception('Unrecognized data type specified: %s' % args.dtype)
 
+assert deepspeed.version == '0.5.6'
+
 torch.manual_seed(0)
 deepspeed.init_distributed()
 deepspeed.utils.groups.initialize(ep_size=dist_world_size)
@@ -119,7 +121,7 @@ dist_print(model)
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 
 torch.manual_seed(0)
-x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=True, device=device)
+x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=False, device=device)
 y = torch.LongTensor(batch_size).random_(1).to(device)
 
 tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, top_value, device)
@@ -133,8 +135,8 @@ for i in range(num_steps):
 
     torch.cuda.synchronize()
     t_start = time.time()
-    optimizer.zero_grad()
 
+    optimizer.zero_grad()
     output = model(x)
     loss = F.nll_loss(output, y)
     loss.backward()
@@ -146,7 +148,11 @@ for i in range(num_steps):
 
     torch.cuda.synchronize()
     t_stop = time.time()
-    dist_print('STEP-%s: DONE, loss = %s, step_time = %s sec.' % (i, float(loss.data), t_stop - t_start))
+
+    num_global_experts = num_local_experts * dist_world_size
+    args.top = min(args.top, num_global_experts)
+    tflops = (batch_size * num_tokens * model_dim * hidden_size) * 4 * args.top * 3 * 1e-12 / (t_stop - t_start)
+    dist_print('STEP-%s: loss = %.5f, step_time = %.6f sec, perf = %.2f tflops.' % (i, float(loss.data), t_stop - t_start, tflops))
 
     if i + 10 >= num_steps:
         average_time += t_stop - t_start

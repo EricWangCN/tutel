@@ -11,8 +11,11 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-import GPUtil
-
+try:
+  import GPUtil
+  GPU_NAME = GPUtil.getGPUs()[0].name
+except:
+  GPU_NAME = 'unknown'
 
 class HelloworldCaller():
     """A class for run tutel helloworld example with different arguments"""
@@ -29,13 +32,14 @@ class HelloworldCaller():
         a2a_ffn_overlap_degree=1,
         num_steps=100,
         use_model_parallel=False,
+        device='cuda'
         ):
         # Disable NCCL SHM because it's capacity is limited in Azure pipeline
         new_env = os.environ.copy()
         new_env['NCCL_SHM_DISABLE'] = '1'
         """Run helloworld example"""
         if helloworld_file == 'helloworld':
-            command = 'python3 -m torch.distributed.launch --nproc_per_node=' + str(nproc_per_node) + ' tutel/examples/helloworld.py --top ' + str(top) + ' --dtype ' + dtype + ' --num_local_experts ' + str(num_local_experts) + ' --hidden_size ' + str(hidden_size) + ' --batch_size ' + str(batch_size) + ' --a2a_ffn_overlap_degree ' + str(a2a_ffn_overlap_degree) + ' --num_steps ' + str(num_steps)
+            command = 'python3 -m torch.distributed.launch --nproc_per_node=' + str(nproc_per_node) + ' tutel/examples/helloworld.py --top ' + str(top) + ' --dtype ' + dtype + ' --num_local_experts ' + str(num_local_experts) + ' --hidden_size ' + str(hidden_size) + ' --batch_size ' + str(batch_size) + ' --a2a_ffn_overlap_degree ' + str(a2a_ffn_overlap_degree) + ' --num_steps ' + str(num_steps) + ' --device ' + str(device)
             if use_model_parallel:
                 command += ' --parallel_type model'
             else:
@@ -45,15 +49,16 @@ class HelloworldCaller():
         losses = []
         while p.poll() is None:
             line = p.stdout.readline().decode("utf8").split()
-            if len(line) > 5:
-                if line[2] == 'loss':
+            for i in range(len(line) - 1):
+                if line[i] == 'loss':
                     if is_round:
                         if dtype == 'float32':
-                            losses.append(round(float(line[4][:-1]), 3))
+                            losses.append(round(float(line[i + 2][:-1]), 3))
                         else:
-                            losses.append(round(float(line[4][:-1]), 1))
+                            losses.append(round(float(line[i + 2][:-1]), 1))
                     else:
-                        losses.append(line[4][:-1])
+                        losses.append(line[i + 2][:-1])
+                    break
                 if show_step_time and line[0] == '[Summary]':
                     print('step time:', line[5])
         p.stdout.close()
@@ -64,7 +69,7 @@ class TutelTestCase(unittest.TestCase):
     """A class for tutel test cases."""
     def setUp(self):
         """Hook method for setting up the test"""
-        self.GPUtype = GPUtil.getGPUs()[0].name
+        self.GPUtype = GPU_NAME
         with open('tests/test_baseline.json') as f:
             self.data = json.load(f)
         for i in range(9):
@@ -74,6 +79,15 @@ class TutelTestCase(unittest.TestCase):
                 else:
                     self.data[i]['losses'][j] = round(float(self.data[i]['losses'][j]), 1)
         self.tutelCaller = HelloworldCaller()
+
+    def test_cpu_kernel(self):
+        """Test cpu kernel"""
+        cuda_losses = self.tutelCaller.run(nproc_per_node=1, num_steps=10, device='cuda', show_step_time=False)
+        cpu_losses = self.tutelCaller.run(nproc_per_node=1, num_steps=10, device='cpu', show_step_time=False)
+        for i in range(10):
+            cuda_losses[i] = round(cuda_losses[i],2)
+            cpu_losses[i] = round(cpu_losses[i],2)
+        self.assertEqual(cuda_losses, cpu_losses)
 
     def test_top1_fp32_1_expert(self):
         """Test helloworld with top1 gate, float32 dtype and 1 expert(s)."""
@@ -189,5 +203,5 @@ class TutelTestCase(unittest.TestCase):
                     }):
                         loss, step_time = get_loss_and_step_time(test_case)
                         self.assertEqual(loss, loss_expected)
-                        print('\nsubcase(ndevs=%s, dtype=%s, local_experts=%s, algo=%s): step_time = %s (expected = %s)' % (nproc_per_node, dtype, num_local_experts, algo, step_time, step_time_expected))
+                        print('\nsubcase(ndevs=%s, dtype=%s, local_experts=%s, algo=%s): step_time = %s (LINEAR = %s)' % (nproc_per_node, dtype, num_local_experts, algo, step_time, step_time_expected))
                         self.assertTrue(math.isclose(step_time, step_time_expected, rel_tol=0.01, abs_tol=0.01))

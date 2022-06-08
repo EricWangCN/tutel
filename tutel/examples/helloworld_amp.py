@@ -3,12 +3,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-
-from tutel import system_init
-
-
 import os
-import time
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -17,6 +12,7 @@ from torch import nn
 from torch.cuda.amp import autocast
 import argparse
 
+from tutel import system
 from tutel import moe as tutel_moe
 
 parser = argparse.ArgumentParser()
@@ -35,7 +31,7 @@ parser.add_argument('--a2a_ffn_overlap_degree', type=int, default=1)
 parser.add_argument('--num_steps', type=int, default=100)
 args = parser.parse_args()
 
-parallel_env = system_init.init_data_model_parallel()
+parallel_env = system.init_data_model_parallel()
 dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
 args.local_rank = parallel_env.local_device.index
 
@@ -89,7 +85,7 @@ dist_print(model)
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 
 torch.manual_seed(0)
-x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=True, device=device)
+x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=False, device=device)
 y = torch.LongTensor(batch_size).random_(1).to(device)
 
 tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, top_value, a2a_ffn_overlap_degree, device)
@@ -100,9 +96,8 @@ average_time, num_steps = 0, args.num_steps
 params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
+    t_start = system.record_time()
 
-    torch.cuda.synchronize()
-    t_start = time.time()
     optimizer.zero_grad()
     with autocast():
         output = model(x)
@@ -116,9 +111,12 @@ for i in range(num_steps):
             dist.all_reduce(p.grad)
     optimizer.step()
 
-    torch.cuda.synchronize()
-    t_stop = time.time()
-    dist_print('STEP-%s: DONE, loss = %s, step_time = %s sec.' % (i, float(loss.data), t_stop - t_start))
+    t_stop = system.record_time()
+
+    num_global_experts = tutel_moe.moe_layer.global_expert_count(num_local_experts)
+    args.top = min(args.top, num_global_experts)
+    tflops = (batch_size * num_tokens * model_dim * hidden_size) * 4 * args.top * 3 * 1e-12 / (t_stop - t_start)
+    dist_print('STEP-%s: loss = %.5f, step_time = %.6f sec, perf = %.2f tflops.' % (i, float(loss.data), t_stop - t_start, tflops))
 
     if i + 10 >= num_steps:
         average_time += t_stop - t_start

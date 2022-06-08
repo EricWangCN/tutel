@@ -3,12 +3,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-
-from tutel import system_init
-
-
 import os
-import time
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -16,6 +11,7 @@ import torch.distributed as dist
 from torch import nn
 import argparse
 
+from tutel import system
 from tutel import moe as tutel_moe
 
 parser = argparse.ArgumentParser()
@@ -31,13 +27,15 @@ parser.add_argument('--fp32_gate', default=False, action='store_true')
 parser.add_argument('--top', type=int, default=2)
 parser.add_argument('--l_aux_wt', type=float, default=0.0)
 parser.add_argument('--a2a_ffn_overlap_degree', type=int, default=1)
+parser.add_argument('--allreduce_degree', type=int, default=1)
 parser.add_argument('--num_steps', type=int, default=100)
 parser.add_argument('--parallel_type', type=str, default='auto')
 parser.add_argument('--save_load_checkpoint', default=False, action='store_true')
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+parser.add_argument('--eval', default=False, action='store_true')
 args = parser.parse_args()
 
-parallel_env = system_init.init_data_model_parallel(backend='nccl' if args.device == 'cuda' else 'gloo')
+parallel_env = system.init_data_model_parallel(backend='nccl' if args.device == 'cuda' else 'gloo')
 dist_rank, dist_world_size, dist_print = parallel_env.global_rank, parallel_env.global_size, parallel_env.dist_print
 args.local_rank = parallel_env.local_device.index
 
@@ -99,7 +97,7 @@ if args.save_load_checkpoint:
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 
 torch.manual_seed(0)
-x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=True, device=device)
+x = torch.tensor(torch.randn([batch_size, num_tokens, model_dim], dtype=torch.float32, device='cpu').detach().numpy(), dtype=torch.get_default_dtype(), requires_grad=False, device=device)
 y = torch.LongTensor(batch_size).random_(1).to(device)
 
 tuples = (dist_world_size, args.dtype, model_dim, hidden_size, batch_size * num_tokens, num_local_experts, top_value, a2a_ffn_overlap_degree, args.parallel_type, device)
@@ -107,29 +105,37 @@ dist_print('[Benchmark] world_size = %s, dtype = %s, model_dim = %s, hidden_size
 
 average_time, num_steps = 0, args.num_steps
 
-params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
+if args.allreduce_degree == -1:
+    params_for_all_reduce = []
+else:
+    params_for_all_reduce = [p for p in model.parameters() if not hasattr(p, 'skip_allreduce') and getattr(p, 'requires_grad', False)]
 
 for i in range(num_steps):
-    if x.is_cuda:
-        torch.cuda.synchronize()
-    t_start = time.time()
-    optimizer.zero_grad()
+    t_start = system.record_time()
 
-    output = model(x)
-    loss = F.nll_loss(output, y)
-    if args.l_aux_wt:
-        loss += args.l_aux_wt * model._moe_layer.l_aux
-    loss.backward()
-    if dist_world_size > 1:
-        for p in params_for_all_reduce:
-            p.grad /= dist_world_size
-            dist.all_reduce(p.grad)
-    optimizer.step()
+    if not args.eval:
+        optimizer.zero_grad()
+        output = model(x)
+        loss = F.nll_loss(output, y)
+        if args.l_aux_wt:
+            loss += args.l_aux_wt * model._moe_layer.l_aux
+        loss.backward()
+        if dist_world_size > 1:
+            for p in params_for_all_reduce:
+                p.grad /= dist_world_size
+                dist.all_reduce(p.grad)
+        optimizer.step()
+    else:
+        with torch.no_grad():
+            output = model(x)
+            loss = F.nll_loss(output, y)
 
-    if x.is_cuda:
-        torch.cuda.synchronize()
-    t_stop = time.time()
-    dist_print('STEP-%s: DONE, loss = %s, step_time = %s sec.' % (i, float(loss.data), t_stop - t_start))
+    t_stop = system.record_time()
+
+    num_global_experts = tutel_moe.moe_layer.global_expert_count(num_local_experts)
+    mm_ceof, cap_ceof = 1 if args.eval else 3, min(args.top, num_global_experts)
+    tflops = (batch_size * num_tokens * model_dim * hidden_size) * 4 * mm_ceof * cap_ceof * 1e-12 / (t_stop - t_start)
+    dist_print('STEP-%s: loss = %.5f, step_time = %.6f sec, perf = %.2f tflops.' % (i, float(loss.data), t_stop - t_start, tflops))
 
     if i + 10 >= num_steps:
         average_time += t_stop - t_start

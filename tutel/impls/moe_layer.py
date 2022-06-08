@@ -107,7 +107,7 @@ class TopKGate(torch.nn.Module):
                                 C.NcclStreamAcquire.apply(
                                     C.CurrentStreamRelease.apply(dispatched_input, 0), 0)), 0), 0)
             else:
-                dispatched_input = C.PrimAllToAll.apply(group, dispatched_input)
+                dispatched_input = C.all_to_all_single(dispatched_input, group=group)
 
             expert_output = ctx.expert_fn(dispatched_input)
             expert_output = expert_output.to(input.dtype)
@@ -120,7 +120,7 @@ class TopKGate(torch.nn.Module):
                                 C.NcclStreamAcquire.apply(
                                     C.CurrentStreamRelease.apply(expert_output, 0), 0)), 0), 0)
             else:
-                expert_output = C.PrimAllToAll.apply(group, expert_output)
+                expert_output = C.all_to_all_single(expert_output, group=group)
         else:
             split_dim = 2
             C.AllToAllStatus.init(group, self.a2a_ffn_overlap_degree, split_dim)
@@ -167,6 +167,17 @@ class TopKGate(torch.nn.Module):
 class MOELayer(torch.nn.Module):
     """Tutel optimized MOELayer
     """
+    @staticmethod
+    def global_expert_count(num_local_experts, group=None):
+        if not isinstance(num_local_experts, int):
+            num_local_experts = -int(1 / (num_local_experts + 1e-5))
+        world_size = C.get_world_size(group)
+        if num_local_experts == 0:
+            raise Exception("Invalid value of num_local_experts: %d" % num_local_experts)
+        if num_local_experts > 0:
+            return num_local_experts * world_size
+        assert world_size % -num_local_experts == 0, "Excepting {-num_local_experts} devices to share an expert param, while global device count is {world_size}."
+        return world_size // -num_local_experts
 
     def __init__(
         self,
@@ -191,28 +202,22 @@ class MOELayer(torch.nn.Module):
 
         if not isinstance(experts, dict):
             self.is_builtin_experts = False
-            assert sharded_count == 1, 'Shared experts not enabled for custom expert network'
             self.num_local_experts = len(self.experts)
         else:
             self.is_builtin_experts = True
             self.num_local_experts = experts.get('count_per_node', 1)
-            if not isinstance(self.num_local_experts, int):
-                self.num_local_experts = -int(1 / (self.num_local_experts + 1e-5))
 
-        self.ffn_zero_group = None
+        self.num_global_experts = MOELayer.global_expert_count(self.num_local_experts, self.group)
+
         num_devices = C.get_world_size(self.group)
-        if self.num_local_experts < 0:
-            sharded_count = -self.num_local_experts
-            assert num_devices >= sharded_count, f"Expected to use {sharded_count} devices to maintain 1 expert, while the number of global devices is only {num_devices}"
-            assert num_devices % sharded_count == 0, f"Cannot evenly divide {num_devices} global devices by sharded experts each of whose slice count = {sharded_count}."
-            assert experts['hidden_size_per_expert'] % sharded_count == 0, f"Cannot evenly divide hidden_size_per_expert ({experts['hidden_size_per_expert']}) to {sharded_count} slices."
-            self.num_global_experts = num_devices // sharded_count
+        if self.num_global_experts < num_devices:
+            sharded_count = num_devices // self.num_global_experts
+            assert experts['hidden_size_per_expert'] % sharded_count == 0, f"Can't evenly divide hidden_size_per_expert ({experts['hidden_size_per_expert']}) to {sharded_count} slices"
             self.num_local_experts, experts['hidden_size_per_expert'] = 1, experts['hidden_size_per_expert'] // sharded_count
-            self.sharded_count = sharded_count
             self.ffn_zero_group = C.create_groups_from_world(group_count=self.num_global_experts).model_group
         else:
-            self.num_global_experts = num_devices * self.num_local_experts
             sharded_count = 1
+            self.ffn_zero_group = None
 
         if sharded_count == 1 or not self.is_builtin_experts:
             self.auto_parallel, self.use_model_parallel = False, False
@@ -305,12 +310,12 @@ class MOELayer(torch.nn.Module):
                         fc1_weight, fc2_weight, fc1_bias, fc2_bias = self.fc1_weight, self.fc2_weight, self.fc1_bias, self.fc2_bias
                         if ctx.ffn_zero_group is not None:
                             if not ctx.use_model_parallel:
-                                fc1_weight = C.PrimAllgather.apply(ctx.ffn_zero_group, self.fc1_weight, True)
-                                fc2_weight = C.PrimAllgather.apply(ctx.ffn_zero_group, self.fc2_weight, True)
-                                fc1_bias = C.PrimAllgather.apply(ctx.ffn_zero_group, self.fc1_bias, True)
+                                fc1_weight = C.zero_gather(self.fc1_weight, group=ctx.ffn_zero_group)
+                                fc2_weight = C.zero_gather(self.fc2_weight, group=ctx.ffn_zero_group)
+                                fc1_bias = C.zero_gather(self.fc1_bias, group=ctx.ffn_zero_group)
 
                             # Specially treat fc2_bias to make hybrid data & model parallels equivalent
-                            fc2_bias = C.PrimAllgather.apply(ctx.ffn_zero_group, self.fc2_bias, True)
+                            fc2_bias = C.zero_gather(self.fc2_bias, group=ctx.ffn_zero_group)
                             if fc2_bias.size(-1) != self.model_dim:
                                 fc2_bias = fc2_bias[:, :self.model_dim]
 

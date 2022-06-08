@@ -5,15 +5,16 @@ import os, sys
 import time
 import json
 import torch
+import torch.distributed as dist
 
-from tutel import system_init
-from tutel.impls import communicate as C
+from tutel import system
+from tutel import net as C
 
 def warp_bwd_allreduce(data, is_param):
     if is_param:
         fusable_params.add(id(data))
-        return C.PrimBwdAllreduce.apply(parallel_env.global_group, data)
-    return C.PrimBwdAllreduce.apply(parallel_env.model_group, data)
+        return C.allreduce_backward(data, group=parallel_env.global_group)
+    return C.allreduce_backward(data, group=parallel_env.model_group)
 
 def sharded_randn(shape, dim, dtype, requires_grad=False, is_param=False, device=None):
   if device is None:
@@ -39,7 +40,7 @@ def sharded_randn(shape, dim, dtype, requires_grad=False, is_param=False, device
 
 def init_session(group_size, group_count=1, device_type='cuda'):
   global parallel_env, fusable_params
-  parallel_env = system_init.init_data_model_parallel(group_count=group_count, backend='nccl' if device_type == 'cuda' else 'gloo')
+  parallel_env = system.init_data_model_parallel(group_count=group_count, backend='nccl' if device_type == 'cuda' else 'gloo')
   fusable_params = set()
   assert parallel_env.model_size == group_size, f"This codegen is designed for distributed parallelism = {group_size}, while current session only activates {parallel_env.model_size} device.\n\nPlease retry with command: mpiexec --allow-run-as-root -host localhost -x MASTER_ADDR=localhost -x LOCAL_SIZE={group_size} {sys.executable} -m tutel.launcher.run {sys.executable} {' '.join(sys.argv)}"
 
@@ -51,6 +52,9 @@ def model_executor(module, is_training=True):
   params = model.parameters()
 
   verbose = int(os.environ.get('VERBOSE', '0'))
+  is_cuda = (parallel_env.local_device.type == 'cuda')
+  is_training = is_training and isinstance(output, torch.Tensor)
+  start_result = output.contiguous().view(-1)[0] if isinstance(output, torch.Tensor) else -1
 
   if verbose:
     sys.stderr.write('[%d] %g %g .. %g (%s)\n' % (parallel_env.model_rank, output.flatten()[0], output.flatten()[1], output.flatten()[-1], output.shape))
@@ -67,7 +71,7 @@ def model_executor(module, is_training=True):
   def next_step():
     if parallel_env.group_count > 1:
       dist.barrier()
-    if output.is_cuda:
+    if is_cuda:
       torch.cuda.synchronize(parallel_env.local_device)
     t_start = time.time()
 
@@ -82,15 +86,15 @@ def model_executor(module, is_training=True):
       if parallel_env.group_count > 1:
         for p in params:
           if id(p) not in fusable_params:
-            simple_all_reduce(p.grad, parallel_env.data_group)
+            p.grad = simple_all_reduce(p.grad, group=parallel_env.data_group)
       optimizer.step()
     else:
-      result = model(**inputs).contiguous()
-      result = result.view(-1)[0]
+      result = model(**inputs)
+      result = result.contiguous().view(-1)[0] if isinstance(result, torch.Tensor) else -1
 
     if parallel_env.group_count > 1:
       dist.barrier()
-    if output.is_cuda:
+    if is_cuda:
       torch.cuda.synchronize(parallel_env.local_device)
     t_stop = time.time()
 
@@ -103,7 +107,7 @@ def model_executor(module, is_training=True):
     next_step()
   average_step_time = sum([next_step() for _ in range(5)]) / 5
   if parallel_env.model_rank == 0:
-    sys.stderr.write('  [%s] digest = %g .., time = %g\n' % (name, output.flatten()[0], average_step_time))
+    sys.stderr.write('  [%s] digest = %g .., time = %g\n' % (name, start_result, average_step_time))
     result = json.dumps({'name': name, 'step_time': average_step_time})
     if 'CONFIG_STORE_PATH' in os.environ:
       with open(os.environ['CONFIG_STORE_PATH'], 'w') as fp:
