@@ -30,6 +30,11 @@ curl -LO https://mystic.the-eye.eu/public/AI/pile_neox/data/WikipediaDataset_tex
 cd ..
 ```
 
+## Train a GPT model with Naive Megatron MoE
+```shell
+../run_megatron_gpt_moe_naive.sh
+```
+
 ## Train a GPT model with Tutel MoE (MOE is moe-freq)
 ```shell
 ../run_megatron_gpt.sh
